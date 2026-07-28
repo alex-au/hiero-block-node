@@ -21,6 +21,10 @@ public enum SessionFailureType {
     UNRECOGNIZED_PROOF_TYPE,
     /// This type indicates that the block is of unsupported HAPI version
     UNSUPPORTED_HAPI_VERSION,
+    /// This type indicates that the block contains an item type this version of the
+    /// Block Node cannot process (a reserved or specific-handling field number per the
+    /// block stream forward compatibility numbering rule); an upgrade is required
+    UNSUPPORTED_ITEM_TYPE,
     /// This type indicates that the session was cancelled
     CANCELLED,
     /// This type indicates that an unknown error occurred
@@ -37,6 +41,7 @@ public enum SessionFailureType {
             case MISSING_VERIFICATION_DATA -> FailureType.MISSING_VERIFICATION_DATA;
             case UNRECOGNIZED_PROOF_TYPE -> FailureType.UNRECOGNIZED_PROOF_TYPE;
             case UNSUPPORTED_HAPI_VERSION -> FailureType.UNSUPPORTED_HAPI_VERSION;
+            case UNSUPPORTED_ITEM_TYPE -> FailureType.UNSUPPORTED_ITEM_TYPE;
             case CANCELLED -> FailureType.CANCELLED;
             case UNKNOWN_ERROR -> FailureType.UNKNOWN_ERROR;
         };

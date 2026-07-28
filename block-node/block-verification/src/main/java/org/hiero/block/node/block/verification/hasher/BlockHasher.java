@@ -45,6 +45,17 @@ import org.hiero.block.node.spi.blockmessaging.BlockSource;
 /// Eventually, a [HashingResult] is produced.
 public final class BlockHasher implements Supplier<HashingResult> {
     private static final long DATA_BUSY_WAIT_TIME_NANOS = TimeUnit.MICROSECONDS.toNanos(200);
+    /// The first `BlockItem` field number governed by the block stream forward compatibility
+    /// numbering rule. Field numbers below this value belong to the first release; an unknown
+    /// field below it is reserved for item types that require specific handling.
+    private static final int FIRST_FORWARD_COMPATIBLE_FIELD_NUMBER = 20;
+    /// The modulus of the forward compatibility numbering rule: for a field numbered
+    /// [#FIRST_FORWARD_COMPATIBLE_FIELD_NUMBER] or above, the hashing category is the field
+    /// number modulo this value.
+    private static final int CATEGORY_MODULUS = 20;
+    /// The category number of Extension 0; the remaining extension categories up to Extension 7
+    /// follow contiguously.
+    private static final int FIRST_EXTENSION_CATEGORY = 8;
     private final long blockNumber;
     private final BlockSource blockSource;
     private final AtomicBoolean isCanceled;
@@ -57,6 +68,12 @@ public final class BlockHasher implements Supplier<HashingResult> {
     private final NaiveStreamingTreeHasher consensusHeaderHasher;
     private final NaiveStreamingTreeHasher stateChangesHasher;
     private final NaiveStreamingTreeHasher traceDataHasher;
+    /// Hashers for the extension subtrees (Extension 0 to Extension 7, block root tree leaf
+    /// positions 9 to 16). An entry is created lazily when the block contains a future item of
+    /// that extension category; a null entry means the corresponding leaf is absent from the
+    /// block root tree.
+    private final NaiveStreamingTreeHasher[] extensionHashers =
+            new NaiveStreamingTreeHasher[HashingUtilities.EXTENSION_SUBTREE_COUNT];
     private final VerificationDataProvider verificationDataProvider;
     private BlockHeader blockHeader;
     private BlockFooter blockFooter;
@@ -110,86 +127,9 @@ public final class BlockHasher implements Supplier<HashingResult> {
                     } else {
                         this.accumulatedBlockItems.addAll(currentBlockItems);
                         for (final BlockItemUnparsed item : currentBlockItems) {
-                            final BlockItemUnparsed.ItemOneOfType kind =
-                                    item.item().kind();
-                            switch (kind) {
-                                case BLOCK_HEADER -> {
-                                    if (this.blockHeader == null) {
-                                        this.blockHeader = standardParse(BlockHeader.PROTOBUF, item.blockHeader());
-                                        this.hapiProtoVersion = this.blockHeader.hapiProtoVersion();
-                                        if (this.hapiProtoVersion == null) {
-                                            throw new VerificationSessionFailedException(
-                                                    blockNumber,
-                                                    SessionFailureType.MISSING_MANDATORY_FIELD,
-                                                    blockSource);
-                                        } else {
-                                            outputTreeHasher.addLeaf(getBlockItemHash(item));
-                                        }
-                                    } else {
-                                        throw new VerificationSessionFailedException(
-                                                blockNumber, SessionFailureType.UNABLE_TO_PARSE, blockSource);
-                                    }
-                                }
-                                case ROUND_HEADER, EVENT_HEADER ->
-                                    consensusHeaderHasher.addLeaf(getBlockItemHash(item));
-                                case SIGNED_TRANSACTION -> {
-                                    inputTreeHasher.addLeaf(getBlockItemHash(item));
-                                    if (blockItemsRecord.blockNumber() == 0 && !verificationDataProvider.hasTssData()) {
-                                        final LedgerIdPublicationTransactionBody publication =
-                                                findLedgerIdPublication(item.signedTransaction());
-                                        if (publication != null) {
-                                            // publish TSS Data
-                                            final TssData tssData =
-                                                    VerificationHelper.extractTssData(publication, blockNumber);
-                                            verificationDataProvider.safeUpdateTssData(tssData, true);
-                                        }
-                                    }
-                                }
-                                case TRANSACTION_RESULT, TRANSACTION_OUTPUT ->
-                                    outputTreeHasher.addLeaf(getBlockItemHash(item));
-                                case STATE_CHANGES -> stateChangesHasher.addLeaf(getBlockItemHash(item));
-                                case TRACE_DATA -> traceDataHasher.addLeaf(getBlockItemHash(item));
-                                case RECORD_FILE -> {
-                                    if (this.rawRecordFileItemProtoBytes == null) {
-                                        this.rawRecordFileItemProtoBytes = item.recordFileOrThrow();
-                                        outputTreeHasher.addLeaf(getBlockItemHash(item));
-                                    } else {
-                                        throw new VerificationSessionFailedException(
-                                                blockNumber, SessionFailureType.UNABLE_TO_PARSE, blockSource);
-                                    }
-                                }
-                                case BLOCK_FOOTER -> {
-                                    if (this.blockFooter == null) {
-                                        this.blockFooter = standardParse(BlockFooter.PROTOBUF, item.blockFooter());
-                                    } else {
-                                        throw new VerificationSessionFailedException(
-                                                blockNumber, SessionFailureType.UNABLE_TO_PARSE, blockSource);
-                                    }
-                                }
-                                case BLOCK_PROOF -> {
-                                    final BlockProof blockProof = standardParse(BlockProof.PROTOBUF, item.blockProof());
-                                    blockProofs.add(blockProof);
-                                }
-                                case REDACTED_ITEM, FILTERED_SINGLE_ITEM -> {
-                                    // not permitted currently, fail the hashing.
-                                    throw new VerificationSessionFailedException(
-                                            blockNumber, SessionFailureType.UNABLE_TO_PARSE, blockSource);
-                                }
-                                case UNSET -> {
-                                    throw new VerificationSessionFailedException(
-                                            blockNumber, SessionFailureType.UNKNOWN_ERROR, blockSource);
-                                }
-                                default -> {
-                                    // @todo(3195) add field-number based sorting here.
-                                    throw new VerificationSessionFailedException(
-                                            blockNumber, SessionFailureType.UNKNOWN_ERROR, blockSource);
-                                }
-                            }
-                            final List<UnknownField> itemUnknownFields = item.getUnknownFields();
-                            if (!itemUnknownFields.isEmpty()) {
-                                // @todo(3195) add field-number based sorting here.
-                                throw new VerificationSessionFailedException(
-                                        blockNumber, SessionFailureType.UNABLE_TO_PARSE, blockSource);
+                            final SessionFailureType failure = processItem(item, blockItemsRecord.blockNumber());
+                            if (failure != null) {
+                                throw new VerificationSessionFailedException(blockNumber, failure, blockSource);
                             }
                         }
                     }
@@ -216,6 +156,177 @@ public final class BlockHasher implements Supplier<HashingResult> {
         return isCanceled.get() || Thread.currentThread().isInterrupted();
     }
 
+    /// Processes a single block item: hashes it into the correct subtree and captures block
+    /// level data (header, footer, proofs) along the way.
+    ///
+    /// The switch below is deliberately an exhaustive switch expression with no default branch.
+    /// When a new item type is added to the `BlockItem` schema, compilation fails here until the
+    /// new type is given an explicit handling decision. An item type that is unknown to the
+    /// compiled schema altogether surfaces as `UNSET` with the data preserved as an unknown
+    /// field, and is handled by the forward compatibility numbering rule in
+    /// [#processFutureItem].
+    /// @param item the block item to process
+    /// @param itemsBlockNumber the block number carried by the current block items record
+    /// @return null on success, or the failure type when the block must be refused
+    /// @throws ParseException if a known item fails to parse
+    private SessionFailureType processItem(final BlockItemUnparsed item, final long itemsBlockNumber)
+            throws ParseException {
+        final BlockItemUnparsed.ItemOneOfType kind = item.item().kind();
+        final List<UnknownField> unknownFields = item.getUnknownFields();
+        final SessionFailureType failure;
+        if (kind != BlockItemUnparsed.ItemOneOfType.UNSET && !unknownFields.isEmpty()) {
+            // A BlockItem is a protobuf oneof, so a valid item carries exactly one field. A known
+            // item type alongside unknown fields means multiple fields were encoded: malformed.
+            failure = SessionFailureType.UNABLE_TO_PARSE;
+        } else {
+            failure = switch (kind) {
+                case BLOCK_HEADER -> {
+                    if (this.blockHeader != null) {
+                        yield SessionFailureType.UNABLE_TO_PARSE;
+                    } else {
+                        this.blockHeader = standardParse(BlockHeader.PROTOBUF, item.blockHeader());
+                        this.hapiProtoVersion = this.blockHeader.hapiProtoVersion();
+                        if (this.hapiProtoVersion == null) {
+                            yield SessionFailureType.MISSING_MANDATORY_FIELD;
+                        } else {
+                            outputTreeHasher.addLeaf(getBlockItemHash(item));
+                            yield null;
+                        }
+                    }
+                }
+                case ROUND_HEADER, EVENT_HEADER -> {
+                    consensusHeaderHasher.addLeaf(getBlockItemHash(item));
+                    yield null;
+                }
+                case SIGNED_TRANSACTION -> {
+                    inputTreeHasher.addLeaf(getBlockItemHash(item));
+                    if (itemsBlockNumber == 0 && !verificationDataProvider.hasTssData()) {
+                        final LedgerIdPublicationTransactionBody publication =
+                                findLedgerIdPublication(item.signedTransaction());
+                        if (publication != null) {
+                            // publish TSS Data
+                            final TssData tssData = VerificationHelper.extractTssData(publication, blockNumber);
+                            verificationDataProvider.safeUpdateTssData(tssData, true);
+                        }
+                    }
+                    yield null;
+                }
+                case TRANSACTION_RESULT, TRANSACTION_OUTPUT -> {
+                    outputTreeHasher.addLeaf(getBlockItemHash(item));
+                    yield null;
+                }
+                case STATE_CHANGES -> {
+                    stateChangesHasher.addLeaf(getBlockItemHash(item));
+                    yield null;
+                }
+                case TRACE_DATA -> {
+                    traceDataHasher.addLeaf(getBlockItemHash(item));
+                    yield null;
+                }
+                case RECORD_FILE -> {
+                    if (this.rawRecordFileItemProtoBytes != null) {
+                        yield SessionFailureType.UNABLE_TO_PARSE;
+                    } else {
+                        this.rawRecordFileItemProtoBytes = item.recordFileOrThrow();
+                        outputTreeHasher.addLeaf(getBlockItemHash(item));
+                        yield null;
+                    }
+                }
+                case BLOCK_FOOTER -> {
+                    if (this.blockFooter != null) {
+                        yield SessionFailureType.UNABLE_TO_PARSE;
+                    } else {
+                        this.blockFooter = standardParse(BlockFooter.PROTOBUF, item.blockFooter());
+                        yield null;
+                    }
+                }
+                case BLOCK_PROOF -> {
+                    blockProofs.add(standardParse(BlockProof.PROTOBUF, item.blockProof()));
+                    yield null;
+                }
+                // not permitted currently, fail the hashing.
+                case REDACTED_ITEM, FILTERED_SINGLE_ITEM -> SessionFailureType.UNABLE_TO_PARSE;
+                case UNSET -> processFutureItem(item, unknownFields);
+            };
+        }
+        return failure;
+    }
+
+    /// Handles an item whose type is unknown to the compiled schema, applying the block stream
+    /// forward compatibility numbering rule: for a field numbered 20 or above, the hashing
+    /// category is the field number modulo 20. Categories that map to a defined subtree are
+    /// hashed like any other item, not-hashed categories are read and ignored, and everything
+    /// else refuses the block, because guessing could produce a hash that disagrees with an
+    /// upgraded node.
+    /// @param item the block item carrying the unknown field
+    /// @param unknownFields the unknown fields of the item
+    /// @return null on success, or the failure type when the block must be refused
+    private SessionFailureType processFutureItem(final BlockItemUnparsed item, final List<UnknownField> unknownFields) {
+        final SessionFailureType failure;
+        if (unknownFields.isEmpty()) {
+            // an item with no field at all, nothing valid to process
+            failure = SessionFailureType.UNKNOWN_ERROR;
+        } else if (unknownFields.size() > 1) {
+            // a BlockItem is a oneof, more than one field is malformed
+            failure = SessionFailureType.UNABLE_TO_PARSE;
+        } else {
+            final int fieldNumber = unknownFields.getFirst().field();
+            if (fieldNumber < FIRST_FORWARD_COMPATIBLE_FIELD_NUMBER) {
+                // an unknown field below 20 is a first release field reserved for item types that
+                // require specific handling this version does not know
+                hashingMetrics.futureItemsRefused().increment();
+                failure = SessionFailureType.UNSUPPORTED_ITEM_TYPE;
+            } else {
+                final int category = fieldNumber % CATEGORY_MODULUS;
+                failure = switch (category) {
+                    case 0, 19 -> {
+                        // not part of the block proof merkle tree, read and ignore
+                        hashingMetrics.futureItemsNotHashed().increment();
+                        yield null;
+                    }
+                    case 3 -> hashFutureItem(item, consensusHeaderHasher);
+                    case 4 -> hashFutureItem(item, inputTreeHasher);
+                    case 5 -> hashFutureItem(item, outputTreeHasher);
+                    case 6 -> hashFutureItem(item, stateChangesHasher);
+                    case 7 -> hashFutureItem(item, traceDataHasher);
+                    case 8, 9, 10, 11, 12, 13, 14, 15 ->
+                        hashFutureItem(item, extensionHasher(category - FIRST_EXTENSION_CATEGORY));
+                    // categories 1 and 2 require specific handling this version does not know, and
+                    // categories 16 to 18 are reserved with no subtree in the block root tree
+                    default -> {
+                        hashingMetrics.futureItemsRefused().increment();
+                        yield SessionFailureType.UNSUPPORTED_ITEM_TYPE;
+                    }
+                };
+            }
+        }
+        return failure;
+    }
+
+    /// Hashes a future item into the given subtree hasher.
+    /// @param item the block item to hash
+    /// @param hasher the subtree hasher the item's category maps to
+    /// @return always null, the item was hashed successfully
+    private SessionFailureType hashFutureItem(final BlockItemUnparsed item, final NaiveStreamingTreeHasher hasher) {
+        hasher.addLeaf(getBlockItemHash(item));
+        hashingMetrics.futureItemsHashed().increment();
+        return null;
+    }
+
+    /// Returns the hasher for the given extension subtree, creating it on first use.
+    /// @param extensionIndex the extension subtree index, 0 to 7
+    /// @return the hasher for the given extension subtree
+    private NaiveStreamingTreeHasher extensionHasher(final int extensionIndex) {
+        final NaiveStreamingTreeHasher hasher;
+        if (extensionHashers[extensionIndex] == null) {
+            hasher = new NaiveStreamingTreeHasher();
+            extensionHashers[extensionIndex] = hasher;
+        } else {
+            hasher = extensionHashers[extensionIndex];
+        }
+        return hasher;
+    }
+
     /// Finish the hashing operation.
     /// This method will finalize the hashing process. Root hash will be calculated and
     /// a [HashingResult] will be returned.
@@ -231,6 +342,13 @@ public final class BlockHasher implements Supplier<HashingResult> {
             final Bytes previousBlockHash = blockFooter.previousBlockRootHash();
             final Bytes startOfBlockStateRootHash = blockFooter.startOfBlockStateRootHash();
             if (validFields(timestamp, rootOfAllPreviousBlockHashes, previousBlockHash, startOfBlockStateRootHash)) {
+                final byte[][] extensionSubtreeRoots = new byte[extensionHashers.length][];
+                for (int i = 0; i < extensionHashers.length; i++) {
+                    if (extensionHashers[i] != null) {
+                        extensionSubtreeRoots[i] =
+                                extensionHashers[i].rootHash().join().toByteArray();
+                    }
+                }
                 final Bytes blockRootHash = HashingUtilities.computeFinalBlockHash(
                         timestamp,
                         previousBlockHash,
@@ -240,7 +358,8 @@ public final class BlockHasher implements Supplier<HashingResult> {
                         outputTreeHasher,
                         consensusHeaderHasher,
                         stateChangesHasher,
-                        traceDataHasher);
+                        traceDataHasher,
+                        extensionSubtreeRoots);
                 final BlockUnparsed block = BlockUnparsed.newBuilder()
                         .blockItems(accumulatedBlockItems)
                         .build();

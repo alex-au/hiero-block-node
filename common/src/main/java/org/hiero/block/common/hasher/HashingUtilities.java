@@ -283,7 +283,18 @@ public final class HashingUtilities {
     }
 
     /**
-     * Computes the final block hash from the given block footer, timestamp and tree hashers.
+     * The number of extension subtree leaf positions (9 to 16) in the block root fixed size tree
+     * ("Merkle Mountain Top" in HIP-1424). These positions are reserved for future block item
+     * categories; a position carries a leaf only when the block contains at least one item of the
+     * corresponding extension category.
+     */
+    public static final int EXTENSION_SUBTREE_COUNT = 8;
+
+    private static final byte[][] NO_EXTENSION_SUBTREES = new byte[EXTENSION_SUBTREE_COUNT][];
+
+    /**
+     * Computes the final block hash from the given block footer, timestamp and tree hashers,
+     * with no extension subtree leaves present.
      * @param blockTimestamp the block timestamp
      * @param previousBlockHash the previous block hash
      * @param rootHashOfAllPreviousBlockHashes root Hash of All previous Block Hashes
@@ -305,6 +316,57 @@ public final class HashingUtilities {
             @NonNull final StreamingTreeHasher consensusHeaderHasher,
             @NonNull final StreamingTreeHasher stateChangesHasher,
             @NonNull final StreamingTreeHasher traceDataHasher) {
+        return computeFinalBlockHash(
+                blockTimestamp,
+                previousBlockHash,
+                rootHashOfAllPreviousBlockHashes,
+                startOfBlockStateRootHash,
+                inputTreeHasher,
+                outputTreeHasher,
+                consensusHeaderHasher,
+                stateChangesHasher,
+                traceDataHasher,
+                NO_EXTENSION_SUBTREES);
+    }
+
+    /**
+     * Computes the final block hash from the given block footer, timestamp, tree hashers and
+     * extension subtree roots.
+     * <p>
+     * The block root tree is the fixed 16-leaf "Merkle Mountain Top" defined by HIP-1424. Leaves
+     * 1 to 8 are the previous block hash, the root of all previous block hashes, the start of
+     * block state root and the five block item category subtrees. Leaves 9 to 16 are the
+     * extension subtrees, reserved for future block item categories. An extension leaf that has
+     * no items is excluded from the tree entirely; its parent is hashed with the single-child
+     * {@code 0x01} prefix instead of the two-child {@code 0x02} prefix, and a parent with no
+     * children at all is likewise excluded. When no extension subtree is present, the right half
+     * of the mountain top collapses completely and the resulting hash is byte-identical to the
+     * historical 8-leaf computation.
+     * @param blockTimestamp the block timestamp
+     * @param previousBlockHash the previous block hash
+     * @param rootHashOfAllPreviousBlockHashes root Hash of All previous Block Hashes
+     * @param startOfBlockStateRootHash the start of block state root hash
+     * @param inputTreeHasher the input tree hasher
+     * @param outputTreeHasher the output tree hasher
+     * @param consensusHeaderHasher the consensus header hasher
+     * @param stateChangesHasher the state changes hasher
+     * @param traceDataHasher the trace data hasher
+     * @param extensionSubtreeRoots the roots of the eight extension subtrees, in extension order
+     *     (Extension 0 to Extension 7, leaf positions 9 to 16); an entry MUST be {@code null}
+     *     when that extension subtree has no leaves, so the leaf is excluded from the tree
+     * @return the final block hash
+     */
+    public static Bytes computeFinalBlockHash(
+            @NonNull final Timestamp blockTimestamp,
+            @NonNull final Bytes previousBlockHash,
+            @NonNull final Bytes rootHashOfAllPreviousBlockHashes,
+            @NonNull final Bytes startOfBlockStateRootHash,
+            @NonNull final StreamingTreeHasher inputTreeHasher,
+            @NonNull final StreamingTreeHasher outputTreeHasher,
+            @NonNull final StreamingTreeHasher consensusHeaderHasher,
+            @NonNull final StreamingTreeHasher stateChangesHasher,
+            @NonNull final StreamingTreeHasher traceDataHasher,
+            @NonNull final byte[][] extensionSubtreeRoots) {
         Objects.requireNonNull(blockTimestamp);
         Objects.requireNonNull(previousBlockHash);
         Objects.requireNonNull(rootHashOfAllPreviousBlockHashes);
@@ -314,6 +376,11 @@ public final class HashingUtilities {
         Objects.requireNonNull(consensusHeaderHasher);
         Objects.requireNonNull(stateChangesHasher);
         Objects.requireNonNull(traceDataHasher);
+        Objects.requireNonNull(extensionSubtreeRoots);
+        if (extensionSubtreeRoots.length != EXTENSION_SUBTREE_COUNT) {
+            throw new IllegalArgumentException("Expected exactly " + EXTENSION_SUBTREE_COUNT
+                    + " extension subtree roots, got " + extensionSubtreeRoots.length);
+        }
 
         final byte[] rootOfConsensusHeaders =
                 consensusHeaderHasher.rootHash().join().toByteArray();
@@ -337,13 +404,58 @@ public final class HashingUtilities {
         final byte[] depth4Node2 = hashInternalNode(depth5Node3, depth5Node4);
         // Depth 3
         final byte[] depth3Node1 = hashInternalNode(depth4Node1, depth4Node2);
-        // Depth 2: reserved subtree (single child, right side is null/reserved)
-        final byte[] fixedRootTree = hashInternalNodeSingleChild(depth3Node1);
+        // Depth 3, right side: root over the extension subtrees (leaf positions 9 to 16), or null
+        // when no extension subtree is present
+        final byte[] depth3Node2 = combineExtensionSubtreeRoots(extensionSubtreeRoots);
+        // Depth 2: two children when any extension subtree is present, single child otherwise
+        final byte[] fixedRootTree = depth3Node2 == null
+                ? hashInternalNodeSingleChild(depth3Node1)
+                : hashInternalNode(depth3Node1, depth3Node2);
         // Root: combine timestamp leaf with fixed root tree
         final byte[] timestampLeaf =
                 hashLeaf(Timestamp.PROTOBUF.toBytes(blockTimestamp).toByteArray());
         final byte[] rootHash = hashInternalNode(timestampLeaf, fixedRootTree);
 
         return Bytes.wrap(rootHash);
+    }
+
+    /**
+     * Combines the eight extension subtree roots (leaf positions 9 to 16 of the block root fixed
+     * size tree) into the root of the right half of the tree. Absent leaves ({@code null}
+     * entries) are excluded per HIP-1424: a parent with a single present child is hashed with the
+     * {@code 0x01} prefix and a parent with no present children is itself excluded.
+     * @param roots the eight extension subtree roots, {@code null} entries marking absent leaves
+     * @return the root of the extension half of the tree, or {@code null} when all leaves are absent
+     */
+    private static byte[] combineExtensionSubtreeRoots(@NonNull final byte[][] roots) {
+        final byte[] depth5Node5 = combineOptionalNodes(roots[0], roots[1]);
+        final byte[] depth5Node6 = combineOptionalNodes(roots[2], roots[3]);
+        final byte[] depth5Node7 = combineOptionalNodes(roots[4], roots[5]);
+        final byte[] depth5Node8 = combineOptionalNodes(roots[6], roots[7]);
+        final byte[] depth4Node3 = combineOptionalNodes(depth5Node5, depth5Node6);
+        final byte[] depth4Node4 = combineOptionalNodes(depth5Node7, depth5Node8);
+        return combineOptionalNodes(depth4Node3, depth4Node4);
+    }
+
+    /**
+     * Hashes an internal node whose children may be absent: two present children use the
+     * {@code 0x02} prefix, a single present child uses the {@code 0x01} prefix, and no present
+     * children means the node itself is absent.
+     * @param left the left child hash, or {@code null} when absent
+     * @param right the right child hash, or {@code null} when absent
+     * @return the node hash, or {@code null} when both children are absent
+     */
+    private static byte[] combineOptionalNodes(final byte[] left, final byte[] right) {
+        final byte[] node;
+        if (left == null && right == null) {
+            node = null;
+        } else if (left == null) {
+            node = hashInternalNodeSingleChild(right);
+        } else if (right == null) {
+            node = hashInternalNodeSingleChild(left);
+        } else {
+            node = hashInternalNode(left, right);
+        }
+        return node;
     }
 }

@@ -49,6 +49,12 @@ class SessionFailureTypeTest {
     }
 
     @Test
+    void unsupportedItemTypeMapsToCorrectFailureType() {
+        assertThat(SessionFailureType.UNSUPPORTED_ITEM_TYPE.asFailureType())
+                .isEqualTo(FailureType.UNSUPPORTED_ITEM_TYPE);
+    }
+
+    @Test
     void cancelledMapsToCorrectFailureType() {
         assertThat(SessionFailureType.CANCELLED.asFailureType()).isEqualTo(FailureType.CANCELLED);
     }
@@ -67,6 +73,6 @@ class SessionFailureTypeTest {
 
     @Test
     void enumValueCount_matchesExpected() {
-        assertThat(SessionFailureType.values()).hasSize(9);
+        assertThat(SessionFailureType.values()).hasSize(10);
     }
 }
