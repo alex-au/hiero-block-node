@@ -163,7 +163,7 @@ public class BlockNodeApp implements HealthFacility, ApplicationStateFacility {
                     LOGGER.log(INFO, "No logging configuration found");
                 }
             } catch (IOException e) {
-                LOGGER.log(INFO, "Failed to load logging configuration", e);
+                LOGGER.log(WARNING, "Failed to load logging configuration", e);
             }
             CleanColorfulFormatter.makeLoggingColorful();
             LOGGER.log(DEBUG, "Using default logging configuration");
@@ -844,7 +844,7 @@ public class BlockNodeApp implements HealthFacility, ApplicationStateFacility {
                     NetworkData.JSON, Bytes.wrap(Files.readAllBytes(path)), MAX_APP_STATE_MESSAGE_SIZE_BYTES);
             return data;
         } catch (ParseException | IOException e) {
-            LOGGER.log(INFO, "Failed to read network data file %s.".formatted(path), e);
+            LOGGER.log(WARNING, "Failed to read network data file %s.".formatted(path), e);
             return NetworkData.DEFAULT;
         }
     }
@@ -886,7 +886,7 @@ public class BlockNodeApp implements HealthFacility, ApplicationStateFacility {
                 kf.generatePublic(new X509EncodedKeySpec(keyBytes));
                 usable++;
             } catch (InvalidKeySpecException | IllegalArgumentException e) {
-                LOGGER.log(INFO, "Malformed RSA_PubKey for node {0} — skipped: {1}", addr.nodeId(), e);
+                LOGGER.log(WARNING, "Malformed RSA_PubKey for node %s — skipped".formatted(addr.nodeId()), e);
             }
         }
         if (usable == 0) {
