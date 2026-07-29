@@ -49,26 +49,26 @@ Before triggering any workflow:
 
 **Inputs:**
 
-| Input | Values | Description |
-|-------|--------|-------------|
-| `release_type` | `rc`, `alpha`, `GA`, `custom` | Determines how the next version is derived from `version.txt`. |
-| `custom_version` | free text | Required only when `release_type` is `custom` (e.g. `0.39.1`). |
+|      Input       |            Values             |                          Description                           |
+|------------------|-------------------------------|----------------------------------------------------------------|
+| `release_type`   | `rc`, `alpha`, `GA`, `custom` | Determines how the next version is derived from `version.txt`. |
+| `custom_version` | free text                     | Required only when `release_type` is `custom` (e.g. `0.39.1`). |
 
 **What it does, in order:**
 
-| Step | Effect |
-|------|--------|
-| Compute version | Derives the next semver from `version.txt` on the dispatching branch and `release_type`. `rc` increments the RC counter (or starts at `rc1` from SNAPSHOT). `GA` strips the pre-release suffix. |
-| Create / switch release branch | Creates `release/X.Y` from `main` if it doesn't exist, or checks it out. |
-| Bump version | Runs `./gradlew versionAsSpecified` to write the new version into `version.txt`, chart files, etc. |
-| Close milestone | GA runs only: closes the GitHub milestone matching the release version. |
-| Commit + tag | GPG-signs the bump commit and pushes the `vX.Y.Z` tag. The tag push simultaneously triggers `release-push-image.yaml`. |
-| Build protobuf artifact | Runs `:protobuf-sources:generateBlockNodeProtoArtifact` on the already-checked-out repo. |
-| Build block-stream-tools artifact | Runs `:tools:shadowJar` and renames to `block-stream-tools-X.Y.Z.jar`. |
-| Upload artifacts | Both artifacts are uploaded as workflow artifacts within the same run so `create_release` can retrieve them without a separate racing job. |
-| Generate release notes | Calls the reusable `release-notes-generator.yaml` (see below). |
-| Create draft release | Creates (or updates) a **draft** GitHub release with notes and artifacts attached. The release stays draft until the release manager manually publishes it. |
-| Bump main snapshot | When `release/X.Y` is newly created, opens a PR on `main` to advance `version.txt` to `X.(Y+1).0-SNAPSHOT`. |
+|               Step                |                                                                                             Effect                                                                                              |
+|-----------------------------------|-------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|
+| Compute version                   | Derives the next semver from `version.txt` on the dispatching branch and `release_type`. `rc` increments the RC counter (or starts at `rc1` from SNAPSHOT). `GA` strips the pre-release suffix. |
+| Create / switch release branch    | Creates `release/X.Y` from `main` if it doesn't exist, or checks it out.                                                                                                                        |
+| Bump version                      | Runs `./gradlew versionAsSpecified` to write the new version into `version.txt`, chart files, etc.                                                                                              |
+| Close milestone                   | GA runs only: closes the GitHub milestone matching the release version.                                                                                                                         |
+| Commit + tag                      | GPG-signs the bump commit and pushes the `vX.Y.Z` tag. The tag push simultaneously triggers `release-push-image.yaml`.                                                                          |
+| Build protobuf artifact           | Runs `:protobuf-sources:generateBlockNodeProtoArtifact` on the already-checked-out repo.                                                                                                        |
+| Build block-stream-tools artifact | Runs `:tools:shadowJar` and renames to `block-stream-tools-X.Y.Z.jar`.                                                                                                                          |
+| Upload artifacts                  | Both artifacts are uploaded as workflow artifacts within the same run so `create_release` can retrieve them without a separate racing job.                                                      |
+| Generate release notes            | Calls the reusable `release-notes-generator.yaml` (see below).                                                                                                                                  |
+| Create draft release              | Creates (or updates) a **draft** GitHub release with notes and artifacts attached. The release stays draft until the release manager manually publishes it.                                     |
+| Bump main snapshot                | When `release/X.Y` is newly created, opens a PR on `main` to advance `version.txt` to `X.(Y+1).0-SNAPSHOT`.                                                                                     |
 
 **Result:** GPG-signed tag, draft GitHub release with notes and artifacts, and (on first cut of
 a minor) an open PR bumping `main` to the next snapshot.
@@ -83,9 +83,9 @@ via `workflow_dispatch` to regenerate or preview notes.
 **What it does:** Checks out the release branch, resolves the latest semver tag on it, installs
 git-cliff, generates the changelog, and uploads it as a workflow artifact.
 
-| Release type | Changelog range |
-|---|---|
-| RC (`is_prerelease: true`) | Incremental — commits since the previous tag (`--latest`). |
+|        Release type         |                            Changelog range                            |
+|-----------------------------|-----------------------------------------------------------------------|
+| RC (`is_prerelease: true`)  | Incremental — commits since the previous tag (`--latest`).            |
 | GA (`is_prerelease: false`) | Full cycle — all commits from the previous stable GA tag to this one. |
 
 The generated notes include a placeholder header asking the release manager to add a 2–4 sentence
@@ -101,13 +101,13 @@ narrative summary before publishing.
 
 **What it does:**
 
-| Job | Output |
-|-----|--------|
-| `publish-app` | Builds the block-node server and solo-dev Docker images; pushes to GHCR (`ghcr.io/hiero-ledger/hiero-block-node:<version>` and `-solo-dev:<version>`). |
-| `publish-jars` | Publishes all project JARs to Maven Central (release versions) or Maven Central Snapshots (SNAPSHOT versions). Requires GPG signing. |
-| `publish-simulator` | Builds and pushes the simulator Docker image to GHCR. |
-| `helm-chart-release-app` | Packages and pushes the `block-node-server` Helm chart to the OCI registry on GHCR. |
-| `helm-chart-release-simulator` | Packages and pushes the `blockstream-simulator` Helm chart. |
+|              Job               |                                                                         Output                                                                         |
+|--------------------------------|--------------------------------------------------------------------------------------------------------------------------------------------------------|
+| `publish-app`                  | Builds the block-node server and solo-dev Docker images; pushes to GHCR (`ghcr.io/hiero-ledger/hiero-block-node:<version>` and `-solo-dev:<version>`). |
+| `publish-jars`                 | Publishes all project JARs to Maven Central (release versions) or Maven Central Snapshots (SNAPSHOT versions). Requires GPG signing.                   |
+| `publish-simulator`            | Builds and pushes the simulator Docker image to GHCR.                                                                                                  |
+| `helm-chart-release-app`       | Packages and pushes the `block-node-server` Helm chart to the OCI registry on GHCR.                                                                    |
+| `helm-chart-release-simulator` | Packages and pushes the `blockstream-simulator` Helm chart.                                                                                            |
 
 **Mutable `main` tag:** A push to `main` (not a version tag) publishes images tagged with the
 branch name, providing a rolling latest-snapshot image for integration environments.
@@ -166,13 +166,13 @@ workflows run concurrently after the tag push.
 
 ## Artifact Reference
 
-| Artifact | Built by | Published / attached by |
-|----------|----------|------------------------|
-| `block-node-protobuf-X.Y.Z.tgz` | `release-automation.yaml` (`release` job) | `release-automation.yaml` (`create_release` job) — attached to the GitHub draft release |
-| `block-stream-tools-X.Y.Z.jar` | `release-automation.yaml` (`release` job) | `release-automation.yaml` (`create_release` job) — attached to the GitHub draft release |
-| Docker images (server, solo-dev, simulator) | `release-push-image.yaml` | GHCR (not attached to the GitHub release page) |
-| `block-node-server` Helm chart | `release-push-image.yaml` | OCI registry on GHCR |
-| JARs | `release-push-image.yaml` | Maven Central (release) / Maven Central Snapshots (SNAPSHOT) |
+|                  Artifact                   |                 Built by                  |                                 Published / attached by                                 |
+|---------------------------------------------|-------------------------------------------|-----------------------------------------------------------------------------------------|
+| `block-node-protobuf-X.Y.Z.tgz`             | `release-automation.yaml` (`release` job) | `release-automation.yaml` (`create_release` job) — attached to the GitHub draft release |
+| `block-stream-tools-X.Y.Z.jar`              | `release-automation.yaml` (`release` job) | `release-automation.yaml` (`create_release` job) — attached to the GitHub draft release |
+| Docker images (server, solo-dev, simulator) | `release-push-image.yaml`                 | GHCR (not attached to the GitHub release page)                                          |
+| `block-node-server` Helm chart              | `release-push-image.yaml`                 | OCI registry on GHCR                                                                    |
+| JARs                                        | `release-push-image.yaml`                 | Maven Central (release) / Maven Central Snapshots (SNAPSHOT)                            |
 
 ---
 
